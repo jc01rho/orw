@@ -145,13 +145,13 @@ async function load(configPath?: string) {
     branches: raw.branches ?? [],
     runtime_dir: abs(raw.runtime_dir ?? ".", configDir),
     poll_minutes: raw.poll_minutes ?? 30,
-    agent: raw.agent ?? "Alfonso - CTO",
+    agent: raw.agent ?? "build",
     model: raw.model ?? "openai/gpt-5.5-fast",
     opencode_bin: raw.opencode_bin ?? "opencode",
     prompt_path: raw.prompt_path ? abs(raw.prompt_path, configDir) : bundledPrompt,
-    desktop_target: abs(raw.desktop_target ?? "/Applications/OpenCode.app", configDir),
+    desktop_target: abs(raw.desktop_target ?? defaultDesktopTarget(), configDir),
     install_cli: raw.install_cli ?? true,
-    install_desktop: raw.install_desktop ?? true,
+    install_desktop: raw.install_desktop ?? defaultInstallDesktop(),
     notify_timeout: raw.notify_timeout ?? 120,
     git_origin: raw.git_origin ?? `https://github.com/${releaseRepo}.git`,
     config_file: file,
@@ -207,14 +207,26 @@ function initConfig(): RawCfg & { runtime_dir: string } {
     base_branch: "dev",
     branches: [],
     poll_minutes: 30,
-    agent: "Alfonso - CTO",
+    agent: "build",
     model: "openai/gpt-5.5-fast",
     opencode_bin: "opencode",
-    desktop_target: "/Applications/OpenCode.app",
+    desktop_target: defaultDesktopTarget(),
     install_cli: true,
-    install_desktop: true,
+    install_desktop: defaultInstallDesktop(),
     notify_timeout: 120,
   };
+}
+
+function defaultInstallDesktop() {
+  return process.platform === "darwin";
+}
+
+function defaultDesktopTarget() {
+  if (process.platform === "darwin") return "/Applications/OpenCode.app";
+  if (process.platform === "win32") {
+    return path.join(os.homedir(), "AppData", "Local", "Programs", "OpenCode", "OpenCode.exe");
+  }
+  return path.join(os.homedir(), "Applications", "OpenCode.AppImage");
 }
 
 async function exists(file: string) {
@@ -294,26 +306,32 @@ async function check(cfg: Cfg, force: boolean) {
     if (running.length > 0) {
       await notify(
         "OpenCode install blocked",
-        `Run bunx ${packageName} install-when-closed, then quit OpenCode to install.`,
+        `Run ${orwCommand(cfg, "install-when-closed")}, then quit OpenCode to install.`,
       );
       out(`Integrated ${release.tag_name}. Install skipped because OpenCode is running:`);
       for (const proc of running) out(`- pid ${proc.pid}: ${proc.command}`);
       out("");
       out("To install after OpenCode exits, run:");
-      out(`  bunx ${packageName} install-when-closed`);
+      out(`  ${orwCommand(cfg, "install-when-closed")}`);
       return;
     }
-    const ok = await ask(
-      "OpenCode build ready",
-      `${release.tag_name} is ready. Install the CLI${cfg.install_desktop ? " and Electron desktop app" : ""} now?`,
-      cfg.notify_timeout,
-    );
-    if (ok === "Yes") {
-      await install(cfg, next);
-      await notify(
-        "OpenCode installed",
-        `${release.tag_name} was installed from the local build.`,
+    if (canPromptForInstall()) {
+      const ok = await ask(
+        "OpenCode build ready",
+        `${release.tag_name} is ready. Install the ${installLabel(cfg)} now?`,
+        cfg.notify_timeout,
       );
+      if (ok === "Yes") {
+        await install(cfg, next);
+        await notify(
+          "OpenCode installed",
+          `${release.tag_name} was installed from the local build.`,
+        );
+      } else {
+        printInstallHint(cfg, release.tag_name);
+      }
+    } else {
+      printInstallHint(cfg, release.tag_name);
     }
     out(`Integrated ${release.tag_name}`);
   } finally {
@@ -409,6 +427,17 @@ async function render(
     merges: sources.map((item) => item.merge).join(", then "),
     cli: cliPath(cfg),
     app: appPathPattern(cfg),
+    desktop_requirement: cfg.install_desktop
+      ? "Build and package the Electron desktop app for this host platform."
+      : "Desktop packaging is disabled in ORW config; build and verify the host CLI only.",
+    desktop_tasks: cfg.install_desktop
+      ? [
+          `7. Prepare the production Electron desktop package in \`packages/desktop\` with \`OPENCODE_CHANNEL=prod OPENCODE_VERSION=${env.OPENCODE_VERSION} bun ./scripts/prepare.ts\`.`,
+          `8. Build the production Electron desktop assets in \`packages/desktop\` with \`OPENCODE_CHANNEL=prod OPENCODE_VERSION=${env.OPENCODE_VERSION} bun run build\`.`,
+          `9. Package the production Electron desktop app in \`packages/desktop\` with \`OPENCODE_CHANNEL=prod OPENCODE_VERSION=${env.OPENCODE_VERSION} bun run ${desktopPackageScript()}\`.`,
+          `10. Confirm a desktop artifact exists at \`${appPathPattern(cfg)}\`.`,
+        ].join("\n")
+      : "7. Skip Electron desktop packaging because `install_desktop` is false.",
     release_repo: cfg.release_repo,
     base: cfg.base_branch,
     release_url: release.html_url,
@@ -437,9 +466,23 @@ function releaseEnv(release: { tag_name: string }) {
   };
 }
 
+function targetArch() {
+  if (process.arch === "arm64" || process.arch === "x64") return process.arch;
+  throw new Error(`Unsupported architecture: ${process.arch}`);
+}
+
+function cliTargetOs() {
+  if (process.platform === "darwin" || process.platform === "linux") return process.platform;
+  if (process.platform === "win32") return "windows";
+  throw new Error(`Unsupported platform: ${process.platform}`);
+}
+
+function cliBinaryName() {
+  return process.platform === "win32" ? "opencode.exe" : "opencode";
+}
+
 function cliPath(cfg: Cfg) {
-  const name =
-    process.arch === "arm64" ? "opencode-darwin-arm64" : "opencode-darwin-x64";
+  const name = `opencode-${cliTargetOs()}-${targetArch()}`;
   return path.join(
     cfg.work_repo,
     "packages",
@@ -447,33 +490,45 @@ function cliPath(cfg: Cfg) {
     "dist",
     name,
     "bin",
-    "opencode",
+    cliBinaryName(),
   );
 }
 
 async function appPath(cfg: Cfg) {
-  const dir = path.join(
-    cfg.work_repo,
-    "packages",
-    "desktop",
-    "dist",
-    process.arch === "arm64" ? "mac-arm64" : "mac",
-  );
-  const list = await fs.readdir(dir);
-  const app = list.find((item: string) => item.endsWith(".app"));
-  if (!app) throw new Error(`No desktop app found in ${dir}`);
-  return path.join(dir, app);
+  const dist = path.join(cfg.work_repo, "packages", "desktop", "dist");
+  const artifact = await findDesktopArtifact(dist);
+  if (!artifact) throw new Error(`No desktop artifact found in ${dist}`);
+  return artifact;
 }
 
 function appPathPattern(cfg: Cfg) {
-  return path.join(
-    cfg.work_repo,
-    "packages",
-    "desktop",
-    "dist",
-    process.arch === "arm64" ? "mac-arm64" : "mac",
-    "*.app",
-  );
+  const dist = path.join(cfg.work_repo, "packages", "desktop", "dist");
+  if (process.platform === "darwin") return path.join(dist, process.arch === "arm64" ? "mac-arm64" : "mac", "*.app");
+  if (process.platform === "linux") return path.join(dist, "opencode-desktop-linux-*");
+  if (process.platform === "win32") return path.join(dist, "opencode-desktop-win-*.exe");
+  return path.join(dist, "<desktop artifact>");
+}
+
+function desktopPackageScript() {
+  if (process.platform === "darwin") return "package:mac";
+  if (process.platform === "linux") return "package:linux";
+  if (process.platform === "win32") return "package:win";
+  throw new Error(`Unsupported desktop packaging platform: ${process.platform}`);
+}
+
+async function findDesktopArtifact(dir: string): Promise<string | undefined> {
+  const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+  for (const entry of entries) {
+    const file = path.join(dir, entry.name);
+    if (process.platform === "darwin" && entry.isDirectory() && entry.name.endsWith(".app")) return file;
+    if (process.platform === "linux" && entry.isFile() && /\.(AppImage|deb|rpm)$/i.test(entry.name)) return file;
+    if (process.platform === "win32" && entry.isFile() && /\.exe$/i.test(entry.name)) return file;
+    if (entry.isDirectory()) {
+      const nested = await findDesktopArtifact(file);
+      if (nested) return nested;
+    }
+  }
+  return undefined;
 }
 
 async function installReady(cfg: Cfg, opts: { waitForOpenCode?: boolean } = {}) {
@@ -514,7 +569,7 @@ async function installWhenClosed(cfg: Cfg) {
 
   out(`Started deferred installer for ${cur.tag}.`);
   out(`Log: ${log}`);
-  out("Quit OpenCode; the installer will copy the CLI and desktop app, codesign, verify, then reopen OpenCode.");
+  out("Quit OpenCode; the installer will wait, then install the ready CLI and any supported desktop artifact.");
 }
 
 async function preview(cfg: Cfg) {
@@ -584,32 +639,57 @@ function watchSlug(owner: string, repo: string) {
   return `${owner}-${repo}`.replace(/[^A-Za-z0-9._-]/g, "-");
 }
 
-async function install(cfg: Cfg, cur: State) {
-  await ensureNoOpenCodeRunning();
-  const cli = cur.cli ?? cliPath(cfg);
+function canPromptForInstall() {
+  return process.platform === "darwin";
+}
+
+function installLabel(cfg: Cfg) {
+  if (cfg.install_desktop && process.platform === "darwin") return "CLI and Electron desktop app";
+  return "CLI";
+}
+
+function orwCommand(cfg: Cfg, command: string) {
+  return `bunx ${packageName} --config ${shellArg(cfg.config_file)} ${command}`;
+}
+
+function printInstallHint(cfg: Cfg, tag: string) {
+  out(`${tag} build is ready.`);
   if (cfg.install_cli) {
-    await run(
-      [
-        path.join(cfg.work_repo, "install"),
-        "--binary",
-        cli,
-        "--no-modify-path",
-      ],
-      {
-        cwd: cfg.work_repo,
-      },
-    );
+    out("To install the built CLI, run:");
+    out(`  ${orwCommand(cfg, "install-ready")}`);
   }
-  if (cfg.install_desktop) {
-    const app = cur.app ?? (await appPath(cfg));
-    await installDesktopApp(app, cfg.desktop_target);
-    await run(["open", cfg.desktop_target]);
+  if (cfg.install_desktop && process.platform !== "darwin") {
+    out("Desktop auto-install is only supported on macOS; the packaged desktop artifact is recorded in status after verification.");
   }
 }
 
+async function install(cfg: Cfg, cur: State) {
+  await ensureNoOpenCodeRunning();
+  const cli = cur.cli ?? cliPath(cfg);
+  if (cfg.install_cli) await installCli(cli);
+  if (cfg.install_desktop) {
+    const app = cur.app ?? (await appPath(cfg));
+    await installDesktopApp(app, cfg.desktop_target);
+  }
+}
+
+async function installCli(source: string) {
+  const target = path.join(os.homedir(), ".opencode", "bin", cliBinaryName());
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  await fs.copyFile(source, target);
+  if (process.platform !== "win32") await fs.chmod(target, 0o755);
+  out(`Installed CLI to ${target}`);
+}
+
 async function installDesktopApp(source: string, target: string) {
+  if (process.platform !== "darwin") {
+    out(`Desktop artifact ready at ${source}`);
+    out("Automatic desktop install is currently only supported on macOS; install this artifact manually.");
+    return;
+  }
   try {
     await installDesktopAppDirect(source, target);
+    await run(["open", target]);
   } catch (err) {
     out(`Direct desktop install failed for ${target}; retrying with administrator privileges.`);
     await installDesktopAppPrivileged(source, target);
@@ -642,6 +722,11 @@ function shell(input: string) {
   return `'${input.replaceAll("'", `'\''`)}'`;
 }
 
+function shellArg(input: string) {
+  if (/^[A-Za-z0-9_./:\\-]+$/.test(input)) return input;
+  return JSON.stringify(input);
+}
+
 async function ensureNoOpenCodeRunning() {
   const running = await runningOpenCodeProcesses();
   if (running.length === 0) return;
@@ -672,6 +757,7 @@ function sleep(ms: number) {
 }
 
 async function runningOpenCodeProcesses(): Promise<OpenCodeProcess[]> {
+  if (process.platform === "win32") return runningWindowsOpenCodeProcesses();
   const text = await textOut(["ps", "-axo", "pid=,command="]);
   return text
     .split(/\r?\n/)
@@ -687,11 +773,31 @@ async function runningOpenCodeProcesses(): Promise<OpenCodeProcess[]> {
     });
 }
 
+async function runningWindowsOpenCodeProcesses(): Promise<OpenCodeProcess[]> {
+  const command = [
+    "Get-CimInstance Win32_Process",
+    "Where-Object { $_.Name -match '^(opencode|OpenCode)(\\.exe)?$' -or $_.CommandLine -match 'OpenCode' }",
+    "ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }",
+  ].join(" | ");
+  const text = await textOut(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command]).catch(() => "");
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .flatMap((line) => {
+      const [pidText, ...commandParts] = line.split("\t");
+      const pid = Number(pidText);
+      const command = commandParts.join("\t");
+      if (!Number.isInteger(pid) || pid === process.pid) return [];
+      return command ? [{ pid, command }] : [];
+    });
+}
+
 function isOpenCodeProcess(command: string) {
   const executable = command.split(/\s+/, 1)[0] ?? "";
   const name = path.basename(executable);
-  if (name === "opencode") return true;
-  if (name === "OpenCode" || name.startsWith("OpenCode ")) return true;
+  if (name === "opencode" || name === "opencode.exe") return true;
+  if (name === "OpenCode" || name === "OpenCode.exe" || name.startsWith("OpenCode ")) return true;
   return /\/OpenCode(?: [^/]+)?\.app\/Contents\//.test(command);
 }
 
@@ -702,6 +808,8 @@ async function status(cfg: Cfg) {
     `source_repo=${cfg.source_repo}`,
     `work_repo=${cfg.work_repo}`,
     `runtime_dir=${cfg.runtime_dir}`,
+    `platform=${process.platform}-${process.arch}`,
+    `install_desktop=${cfg.install_desktop}`,
     `last_tag=${cur.tag ?? "<none>"}`,
     `last_branch=${cur.branch ?? "<none>"}`,
     `last_log=${cur.log ?? "<none>"}`,
@@ -711,6 +819,9 @@ async function status(cfg: Cfg) {
 }
 
 async function installLaunchd(cfg: Cfg) {
+  if (process.platform !== "darwin") {
+    throw new Error("launchd integration is only available on macOS");
+  }
   const bun = process.execPath;
   const uid = process.getuid?.();
   if (uid === undefined)
@@ -755,6 +866,10 @@ ${programArgs.map((item) => `    <string>${xml(item)}</string>`).join("\n")}
 }
 
 async function uninstallLaunchd() {
+  if (process.platform !== "darwin") {
+    out("launchd integration is only available on macOS");
+    return;
+  }
   const uid = process.getuid?.();
   if (uid !== undefined) {
     await run(["launchctl", "bootout", `gui/${uid}`, launch]).catch(() => 0);
@@ -771,6 +886,10 @@ function xml(text: string) {
 }
 
 async function notify(title: string, text: string) {
+  if (process.platform !== "darwin") {
+    out(`${title}: ${text}`);
+    return;
+  }
   await run([
     "osascript",
     "-e",
@@ -779,13 +898,17 @@ async function notify(title: string, text: string) {
 }
 
 async function ask(title: string, text: string, timeout: number) {
-  const out = await textOut([
+  if (process.platform !== "darwin") {
+    out(`${title}: ${text}`);
+    return "No";
+  }
+  const output = await textOut([
     "osascript",
     "-e",
     `display dialog ${quote(text)} buttons {"No", "Yes"} default button "Yes" with title ${quote(title)} giving up after ${timeout}`,
   ]);
-  if (out.includes("gave up:true")) return "No";
-  return out.includes("Yes") ? "Yes" : "No";
+  if (output.includes("gave up:true")) return "No";
+  return output.includes("Yes") ? "Yes" : "No";
 }
 
 function quote(text: string) {

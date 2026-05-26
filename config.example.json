@@ -12,6 +12,6 @@
   "opencode_bin": "opencode",
   "desktop_target": "/Applications/OpenCode.app",
   "install_cli": true,
-  "install_desktop": true,
+  "install_desktop": false,
   "notify_timeout": 120
 }
