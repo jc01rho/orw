@@ -1,0 +1,159 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  verify:
+    name: Verify release package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Sync version from tag
+        run: node scripts/version-sync.mjs --from-tag
+
+      - name: Verify curated release notes exist
+        run: |
+          notes_file=".alfonso/release-notes/${GITHUB_REF_NAME}.md"
+          if [ ! -f "$notes_file" ]; then
+            echo "::error::Curated release notes missing: $notes_file"
+            echo "Draft them under .alfonso/release-notes/ before tagging the release."
+            exit 1
+          fi
+          echo "Using $notes_file as the release body."
+          wc -l "$notes_file"
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Smoke init/status
+        run: |
+          tmp=$(mktemp -d)
+          bun src/index.ts init --config "$tmp/orw.config.json"
+          bun src/index.ts --config "$tmp/orw.config.json" status
+
+      - name: Verify npm package contents
+        run: npm pack --dry-run
+
+  publish-npm:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    needs: verify
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Ensure latest npm for trusted publishing
+        run: npm install -g npm@latest
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Sync version from tag
+        run: node scripts/version-sync.mjs --from-tag
+
+      - name: Publish @cortexkit/orw
+        run: |
+          set -euo pipefail
+          PKG_NAME=$(node -p "require('./package.json').name")
+          VERSION=$(node -p "require('./package.json').version")
+          if npm view "${PKG_NAME}@${VERSION}" version >/dev/null 2>&1; then
+            echo "::notice::${PKG_NAME}@${VERSION} already published; skipping"
+            exit 0
+          fi
+          npm publish --access public --provenance
+
+  github-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: publish-npm
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Verify curated release notes exist
+        run: |
+          notes_file=".alfonso/release-notes/${GITHUB_REF_NAME}.md"
+          if [ ! -f "$notes_file" ]; then
+            echo "::error::Curated release notes missing: $notes_file"
+            echo "Draft them under .alfonso/release-notes/ before tagging the release."
+            exit 1
+          fi
+          echo "Using $notes_file as the release body."
+          wc -l "$notes_file"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: .alfonso/release-notes/${{ github.ref_name }}.md
+
+  discord-announce:
+    name: Announce on Discord
+    runs-on: ubuntu-latest
+    needs: github-release
+    if: success()
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Read curated release notes
+        id: notes
+        run: |
+          notes_file=".alfonso/release-notes/${GITHUB_REF_NAME}.md"
+          if [ ! -f "$notes_file" ]; then
+            echo "::error::Curated release notes missing: $notes_file"
+            exit 1
+          fi
+          eof="EOF_$(openssl rand -hex 12)"
+          {
+            printf 'body<<%s\n' "$eof"
+            cat "$notes_file"
+            printf '\n%s\n' "$eof"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Post to Discord
+        uses: SethCohen/github-releases-to-discord@v1
+        with:
+          webhook_url: ${{ secrets.DISCORD_RELEASE_WEBHOOK_URL }}
+          color: "2902140"
+          username: "ORW Releases"
+          reduce_headings: true
+          remove_github_reference_links: false
+          footer_title: "Changelog"
+          footer_timestamp: true
+          release_name: ${{ github.ref_name }}
+          release_body: ${{ steps.notes.outputs.body }}
+          release_html_url: https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}

@@ -1,0 +1,58 @@
+{
+  "name": "@cortexkit/orw",
+  "version": "0.1.0",
+  "description": "Local OpenCode release integration watcher",
+  "keywords": [
+    "opencode",
+    "release",
+    "automation",
+    "bun",
+    "cli",
+    "macos"
+  ],
+  "author": "Cortexkit",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cortexkit/orw"
+  },
+  "homepage": "https://github.com/cortexkit/orw#readme",
+  "bugs": {
+    "url": "https://github.com/cortexkit/orw/issues"
+  },
+  "type": "module",
+  "packageManager": "bun@1.3.11",
+  "bin": {
+    "orw": "./src/index.ts"
+  },
+  "files": [
+    "src/index.ts",
+    "prompt.txt",
+    "README.md",
+    "config.example.json",
+    "CHANGELOG.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "init": "bun src/index.ts init",
+    "check": "bun src/index.ts check",
+    "force": "bun src/index.ts check --force",
+    "launchd:install": "bun src/index.ts install-launchd",
+    "launchd:uninstall": "bun src/index.ts uninstall-launchd",
+    "preview": "bun src/index.ts preview",
+    "status": "bun src/index.ts status",
+    "install-ready": "bun src/index.ts install-ready",
+    "install-when-closed": "bun src/index.ts install-when-closed",
+    "typecheck": "tsc --noEmit",
+    "prepack": "bun run typecheck"
+  },
+  "devDependencies": {
+    "@types/node": "24.0.0",
+    "typescript": "5.8.2"
+  },
+  "engines": {
+    "bun": ">=1.3.0"
+  }
+}

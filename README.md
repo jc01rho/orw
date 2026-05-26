@@ -1,0 +1,170 @@
+# @cortexkit/orw
+
+OpenCode Release Watch (`orw`) is a local macOS automation tool for rebuilding OpenCode releases with your selected integration refs.
+
+It watches `anomalyco/opencode` releases, creates a disposable clone, fetches your configured local branches / GitHub branch URLs / upstream PR URLs, asks `opencode run` to merge them onto the release tag, builds the CLI and desktop app, then offers to install the verified artifacts.
+
+## Requirements
+
+- macOS
+- [Bun](https://bun.sh/)
+- `git`
+- `opencode` on `PATH`
+- a local OpenCode checkout if you use plain local branch names
+
+## Quick start
+
+Create an empty folder for the watcher state and config:
+
+```bash
+mkdir opencode-release-watch
+cd opencode-release-watch
+bunx @cortexkit/orw init
+```
+
+Edit `orw.config.json`, then preview what the agent will be asked to do:
+
+```bash
+bunx @cortexkit/orw preview
+```
+
+Run the watcher once:
+
+```bash
+bunx @cortexkit/orw check
+```
+
+Force a run even if the latest release was already processed:
+
+```bash
+bunx @cortexkit/orw check --force
+```
+
+## Config
+
+`init` writes `orw.config.json` in the current directory:
+
+```json
+{
+  "release_repo": "anomalyco/opencode",
+  "git_origin": "https://github.com/anomalyco/opencode.git",
+  "source_repo": "./opencode",
+  "work_repo": "./.orw/repo/opencode-build",
+  "runtime_dir": "./.orw",
+  "base_branch": "dev",
+  "branches": [],
+  "poll_minutes": 30,
+  "agent": "Alfonso - CTO",
+  "model": "openai/gpt-5.5-fast",
+  "opencode_bin": "opencode",
+  "desktop_target": "/Applications/OpenCode.app",
+  "install_cli": true,
+  "install_desktop": true,
+  "notify_timeout": 120
+}
+```
+
+### Integration refs
+
+Put the refs you want merged in `branches`, in merge order. Each entry can be:
+
+- a local branch name from `source_repo`
+- a GitHub branch URL
+- a GitHub PR URL
+
+Example:
+
+```json
+{
+  "source_repo": "/Users/you/Work/OSS/opencode",
+  "branches": [
+    "fix/plugin-hook-ordering",
+    "https://github.com/yourname/opencode/tree/fix/other-branch",
+    "https://github.com/anomalyco/opencode/pull/26036"
+  ]
+}
+```
+
+Plain branch names are fetched from `source_repo` as committed branch refs. Uncommitted local worktree changes are not included.
+
+PR URLs are fetched from GitHub's `refs/pull/<number>/head` ref on the PR target repo.
+
+### Paths
+
+Relative paths in config are resolved from the directory containing `orw.config.json`.
+
+- `work_repo`: disposable OpenCode clone used for each integration attempt
+- `runtime_dir`: lock files, logs, and last-success state
+- `prompt_path`: optional custom prompt template; if omitted, the packaged default prompt is used
+
+## Commands
+
+```bash
+bunx @cortexkit/orw init
+bunx @cortexkit/orw preview
+bunx @cortexkit/orw check
+bunx @cortexkit/orw check --force
+bunx @cortexkit/orw status
+bunx @cortexkit/orw install-ready
+bunx @cortexkit/orw install-when-closed
+bunx @cortexkit/orw launchd install
+bunx @cortexkit/orw launchd uninstall
+```
+
+Use `--config <path>` if you keep the config somewhere else:
+
+```bash
+bunx @cortexkit/orw --config /path/to/orw.config.json preview
+```
+
+## launchd
+
+Install a launchd job for periodic checks:
+
+```bash
+bunx @cortexkit/orw launchd install
+```
+
+The job runs every `poll_minutes` and writes launchd output under `runtime_dir/logs`.
+
+Uninstall it with:
+
+```bash
+bunx @cortexkit/orw launchd uninstall
+```
+
+## Install behavior
+
+- CLI install runs OpenCode's upstream `install` script with `--binary <local build> --no-modify-path`.
+- Desktop install copies the packaged Electron `.app` bundle to `desktop_target`.
+- Install is blocked while OpenCode is running. If that happens, run `bunx @cortexkit/orw install-when-closed`, then quit OpenCode.
+- The desktop app has quarantine xattrs removed and is ad-hoc codesigned after copying.
+
+## Safety
+
+- `orw` never pushes.
+- `orw` never opens a PR.
+- Integration happens in the disposable `work_repo` clone.
+- Successful artifacts are independently verified before install is offered.
+
+## Releasing
+
+Releases are tag-driven. Pushing `vX.Y.Z` runs `.github/workflows/release.yml`, which:
+
+1. syncs `package.json` to the tag version,
+2. verifies curated notes exist at `.alfonso/release-notes/vX.Y.Z.md`,
+3. typechecks and smoke-tests `init` / `status`,
+4. verifies package contents with `npm pack --dry-run`,
+5. publishes `@cortexkit/orw` with npm Trusted Publishing and provenance,
+6. creates the GitHub Release from the curated notes,
+7. posts an optional Discord announcement if `DISCORD_RELEASE_WEBHOOK_URL` is configured.
+
+### First npm publish bootstrap
+
+The first npm publish has to happen manually so the package exists on npm before Trusted Publishing can be configured:
+
+```bash
+npm publish --access public
+```
+
+After that first publish, configure npm Trusted Publishing for `@cortexkit/orw` against this repository's `Release` workflow. The tag workflow is safe to run for the same version afterward: if `@cortexkit/orw@X.Y.Z` already exists, the npm publish step skips it and still creates the GitHub Release from the curated notes.
