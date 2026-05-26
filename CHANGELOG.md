@@ -6,4 +6,4 @@ Full user-facing release notes live in GitHub Releases. This file is a lightweig
 
 ## 0.1.x
 
-- **0.1.0** — Initial public release of `@cortexkit/orw`: Bun-powered OpenCode release integration watcher with local branch, GitHub branch URL, and GitHub PR URL support.
+- **0.1.0** — Initial public release of `@cortexkit/orw`: Bun-powered OpenCode release integration watcher with macOS/Linux/Windows CLI support plus local branch, GitHub branch URL, and GitHub PR URL integration sources.

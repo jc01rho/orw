@@ -8,7 +8,9 @@
     "automation",
     "bun",
     "cli",
-    "macos"
+    "macos",
+    "linux",
+    "windows"
   ],
   "author": "Cortexkit",
   "license": "MIT",
