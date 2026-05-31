@@ -65,6 +65,14 @@ type OpenCodeProcess = {
   command: string;
 };
 
+type ExecInput = {
+  cwd?: string;
+  log?: string;
+  env?: Record<string, string>;
+  printStdout?: boolean;
+  printStderr?: boolean;
+};
+
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const packageName = "@cortexkit/orw";
 const configFileName = "orw.config.json";
@@ -1034,25 +1042,21 @@ async function note(file: string, text: string) {
   await fs.writeFile(file, text, { flag: "a" });
 }
 
-async function run(cmd: string[], input?: { cwd?: string; log?: string; env?: Record<string, string> }) {
+async function run(cmd: string[], input?: ExecInput) {
   const code = await exec(cmd, input);
   if (code !== 0) throw new Error(`${cmd[0]} exited with ${code}`);
   return code;
 }
 
-async function textOut(cmd: string[], input?: { cwd?: string; log?: string; env?: Record<string, string> }) {
+async function textOut(cmd: string[], input?: ExecInput) {
   let data = "";
-  await exec(cmd, input, (chunk) => {
+  await exec(cmd, { ...input, printStdout: false }, (chunk) => {
     data += chunk;
   });
   return data.trim();
 }
 
-async function exec(
-  cmd: string[],
-  input?: { cwd?: string; log?: string; env?: Record<string, string> },
-  onStdout?: (chunk: string) => void,
-) {
+async function exec(cmd: string[], input?: ExecInput, onStdout?: (chunk: string) => void) {
   return await new Promise<number>((resolve, reject) => {
     const child = spawn(cmd[0], cmd.slice(1), {
       cwd: input?.cwd,
@@ -1065,13 +1069,13 @@ async function exec(
     };
     child.stdout.on("data", (buf: Buffer) => {
       const chunk = String(buf);
-      process.stdout.write(chunk);
+      if (input?.printStdout !== false) process.stdout.write(chunk);
       onStdout?.(chunk);
       void write(chunk);
     });
     child.stderr.on("data", (buf: Buffer) => {
       const chunk = String(buf);
-      process.stderr.write(chunk);
+      if (input?.printStderr !== false) process.stderr.write(chunk);
       void write(chunk);
     });
     child.on("error", reject);
@@ -1087,4 +1091,10 @@ function out(text: string) {
   process.stdout.write(`${text}\n`);
 }
 
-await main();
+try {
+  await main();
+} catch (err) {
+  const message = err instanceof Error ? err.message : String(err);
+  process.stderr.write(`${message}\n`);
+  process.exitCode = 1;
+}
