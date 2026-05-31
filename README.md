@@ -101,6 +101,7 @@ Relative paths in config are resolved from the directory containing `orw.config.
 ## Commands
 
 ```bash
+bunx @cortexkit/orw --help
 bunx @cortexkit/orw init
 bunx @cortexkit/orw preview
 bunx @cortexkit/orw check
