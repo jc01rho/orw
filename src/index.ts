@@ -38,6 +38,7 @@ type Cli = {
   positionals: string[];
   configPath?: string;
   force: boolean;
+  help: boolean;
   waitForOpenCode: boolean;
 };
 
@@ -79,9 +80,15 @@ const label = "ai.opencode.release-watch";
 
 async function main() {
   const cli = parseCli(process.argv.slice(2));
+  if (cli.help || cli.cmd === "help") return printHelp();
+
   if (cli.cmd === "init") return init(cli);
   if (cli.cmd === "uninstall-launchd") return uninstallLaunchd();
-  if (cli.cmd === "launchd" && cli.positionals[1] === "uninstall") return uninstallLaunchd();
+  if (cli.cmd === "launchd" && cli.positionals[1] === "uninstall" && cli.positionals.length === 2) {
+    return uninstallLaunchd();
+  }
+
+  if (!needsConfig(cli)) return unknown(cli);
 
   const cfg = await load(cli.configPath);
   if (cli.cmd === "install-launchd") return installLaunchd(cfg);
@@ -91,7 +98,6 @@ async function main() {
   if (cli.cmd === "preview") return preview(cfg);
   if (cli.cmd === "status") return status(cfg);
   if (cli.cmd === "check") return check(cfg, cli.force);
-  throw new Error(`Unknown command: ${cli.positionals.join(" ") || cli.cmd}`);
 }
 
 function parseCli(rawArgs: string[]): Cli {
@@ -99,6 +105,7 @@ function parseCli(rawArgs: string[]): Cli {
   const positionals: string[] = [];
   let configPath: string | undefined;
   let force = false;
+  let help = false;
   let waitForOpenCode = false;
 
   for (let i = 0; i < args.length; i++) {
@@ -116,6 +123,10 @@ function parseCli(rawArgs: string[]): Cli {
       force = true;
       continue;
     }
+    if (arg === "--help" || arg === "-h") {
+      help = true;
+      continue;
+    }
     if (arg === "--wait-for-opencode") {
       waitForOpenCode = true;
       continue;
@@ -128,8 +139,33 @@ function parseCli(rawArgs: string[]): Cli {
     positionals,
     configPath,
     force,
+    help,
     waitForOpenCode,
   };
+}
+
+function needsConfig(cli: Cli) {
+  if (cli.cmd === "check") return cli.positionals.length <= 1;
+  if (cli.cmd === "preview") return cli.positionals.length === 1;
+  if (cli.cmd === "status") return cli.positionals.length === 1;
+  if (cli.cmd === "install-ready") return cli.positionals.length === 1;
+  if (cli.cmd === "install-when-closed") return cli.positionals.length === 1;
+  if (cli.cmd === "install-launchd") return cli.positionals.length === 1;
+  return cli.cmd === "launchd" && cli.positionals[1] === "install" && cli.positionals.length === 2;
+}
+
+function unknown(cli: Cli) {
+  process.stderr.write(`Unknown command: ${cli.positionals.join(" ") || cli.cmd}\n\n`);
+  process.stderr.write(helpText());
+  process.exitCode = 1;
+}
+
+function printHelp() {
+  process.stdout.write(helpText());
+}
+
+function helpText() {
+  return `OpenCode Release Watch\n\nUsage:\n  orw [--config <path>] [command] [options]\n  orw --help\n\nCommands:\n  init                  Create orw.config.json in the current directory\n  preview               Print the integration prompt for the latest release\n  check                 Build the latest release if needed; default command\n  status                Print the last successful build/install state\n  install-ready         Install the last verified artifacts\n  install-when-closed   Wait for OpenCode to quit, then install\n  launchd install       Install the macOS launchd scheduler\n  launchd uninstall     Remove the macOS launchd scheduler\n\nOptions:\n  -c, --config <path>       Use a specific config file\n  --force                   Rebuild even if the latest release was processed\n  --wait-for-opencode       With install-ready, wait until OpenCode quits\n  -h, --help                Show this help\n`;
 }
 
 async function load(configPath?: string) {
