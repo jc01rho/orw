@@ -329,7 +329,7 @@ async function check(cfg: Cfg, force: boolean) {
         {
           cwd: cfg.work_repo,
           log,
-          env,
+          env: { ...env, OPENCODE_DISABLE_PROJECT_CONFIG: "1" },
         },
       );
     } catch (err) {
