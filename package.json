@@ -1,6 +1,6 @@
 {
   "name": "@cortexkit/orw",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Local OpenCode release integration watcher",
   "keywords": [
     "opencode",
