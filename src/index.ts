@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 
 import fs from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import type { Buffer } from "node:buffer";
@@ -24,13 +25,17 @@ type RawCfg = {
   install_desktop: boolean;
   notify_timeout: number;
   git_origin: string;
+  retry_attempts?: number;
+  retry_delay_ms?: number;
 };
 
-type Cfg = Omit<RawCfg, "runtime_dir" | "prompt_path"> & {
+type Cfg = Omit<RawCfg, "runtime_dir" | "prompt_path" | "retry_attempts" | "retry_delay_ms"> & {
   runtime_dir: string;
   prompt_path: string;
   config_file: string;
   config_dir: string;
+  retry_attempts: number;
+  retry_delay_ms: number;
 };
 
 type Cli = {
@@ -173,7 +178,7 @@ function printHelp() {
 }
 
 function helpText() {
-  return `OpenCode Release Watch\n\nUsage:\n  orw [--config <path>] [command] [options]\n  orw --help\n\nCommands:\n  init                  Create orw.config.json in the current directory\n  preview               Print the integration prompt for the latest release\n  check                 Build the latest release if needed; default command\n  status                Print the last successful build/install state\n  install-ready         Install the last verified artifacts\n  install-when-closed   Wait for OpenCode to quit, then install\n  launchd install       Install the macOS launchd scheduler\n  launchd uninstall     Remove the macOS launchd scheduler\n\nOptions:\n  -c, --config <path>       Use a specific config file\n  --force                   Rebuild even if the latest release was processed\n  --wait-for-opencode       With install-ready, wait until OpenCode quits\n  -h, --help                Show this help\n`;
+  return `OpenCode Release Watch\n\nUsage:\n  orw [--config <path>] [command] [options]\n  orw --help\n\nCommands:\n  init                  Create orw.config.json in the current directory\n  preview               Print the integration prompt for the latest release\n  check                 Build the latest release if needed; default command\n  status                Print the last successful build/install state\n  install-ready         Install the last verified artifacts\n  install-when-closed   Wait for OpenCode to quit, then install\n  launchd install       Install the macOS launchd scheduler\n  launchd uninstall     Remove the macOS launchd scheduler\n\nOptions:\n  -c, --config <path>       Use a specific config file\n  --force                   Rebuild even if the latest release was processed\n  --wait-for-opencode       With install-ready, wait until OpenCode quits\n  -h, --help                Show this help\n\nConfig (orw.config.json):\n  retry_attempts            Number of retry attempts on provider error (default: 3)\n  retry_delay_ms            Delay between retries in milliseconds (default: 10000)\n`;
 }
 
 async function load(configPath?: string) {
@@ -197,6 +202,8 @@ async function load(configPath?: string) {
     install_cli: raw.install_cli ?? true,
     install_desktop: raw.install_desktop ?? defaultInstallDesktop(),
     notify_timeout: raw.notify_timeout ?? 120,
+    retry_attempts: raw.retry_attempts ?? 3,
+    retry_delay_ms: raw.retry_delay_ms ?? 10_000,
     git_origin: raw.git_origin ?? `https://github.com/${releaseRepo}.git`,
     config_file: file,
     config_dir: configDir,
@@ -258,6 +265,8 @@ function initConfig(): RawCfg & { runtime_dir: string } {
     install_cli: true,
     install_desktop: defaultInstallDesktop(),
     notify_timeout: 120,
+    retry_attempts: 3,
+    retry_delay_ms: 10_000,
   };
 }
 
@@ -316,22 +325,7 @@ async function check(cfg: Cfg, force: boolean) {
     const env = releaseEnv(release);
     const prompt = await render(cfg, sources, release);
     try {
-      await run(
-        [
-          cfg.opencode_bin,
-          "run",
-          "--agent",
-          cfg.agent,
-          "--model",
-          cfg.model,
-          prompt,
-        ],
-        {
-          cwd: cfg.work_repo,
-          log,
-          env: { ...env, OPENCODE_DISABLE_PROJECT_CONFIG: "1" },
-        },
-      );
+      await runOpenCodeWithRetry(cfg, prompt, env, log);
     } catch (err) {
       await notify(
         "OpenCode integration failed",
@@ -414,6 +408,77 @@ async function verifyBuild(
     );
     throw err;
   }
+}
+
+async function runOpenCodeWithRetry(
+  cfg: Cfg,
+  prompt: string,
+  env: Record<string, string>,
+  log: string,
+) {
+  const envWithFlag = { ...env, OPENCODE_DISABLE_PROJECT_CONFIG: "1" };
+  let lastErr: unknown;
+
+  for (let attempt = 1; attempt <= cfg.retry_attempts; attempt++) {
+    const isRetry = attempt > 1;
+    if (isRetry) {
+      out(`Retry attempt ${attempt}/${cfg.retry_attempts} after provider error (waiting ${cfg.retry_delay_ms / 1000}s)...`);
+      await note(log, `\n--- Retry attempt ${attempt}/${cfg.retry_attempts} ---\n`);
+      await sleep(cfg.retry_delay_ms);
+    }
+
+    const args = [cfg.opencode_bin, "run"];
+    if (isRetry) args.push("--continue");
+    args.push("--agent", cfg.agent, "--model", cfg.model, prompt);
+
+    try {
+      await run(args, {
+        cwd: cfg.work_repo,
+        log,
+        env: envWithFlag,
+      });
+      return;
+    } catch (err) {
+      lastErr = err;
+      if (!isRetryableError(err, log)) {
+        throw err;
+      }
+      out(`Attempt ${attempt} failed with retryable provider error.`);
+    }
+  }
+
+  throw lastErr;
+}
+
+function isRetryableError(err: unknown, log: string): boolean {
+  if (!(err instanceof Error)) return false;
+  const msg = err.message.toLowerCase();
+
+  if (msg.includes("exited with")) {
+    try {
+      const logContent = readFileSync(log, "utf8").toLowerCase();
+      return (
+        logContent.includes("provider returned error") ||
+        logContent.includes("provider returned an error") ||
+        logContent.includes("overloaded") ||
+        logContent.includes("rate limit") ||
+        logContent.includes("too many requests") ||
+        logContent.includes("429") ||
+        logContent.includes("503") ||
+        logContent.includes("502") ||
+        logContent.includes("500 internal server error") ||
+        logContent.includes("connection error") ||
+        logContent.includes("fetch failed") ||
+        logContent.includes("socket hang up") ||
+        logContent.includes("econnreset") ||
+        logContent.includes("etimedout") ||
+        logContent.includes("context deadline exceeded")
+      );
+    } catch {
+      return false;
+    }
+  }
+  return false;
 }
 
 async function latest(cfg: Cfg) {
