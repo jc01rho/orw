@@ -7,6 +7,7 @@ import os from "node:os";
 import type { Buffer } from "node:buffer";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { isRetryableError, readLogSlice, fileSize } from "./retry";
 
 type RawCfg = {
   release_repo: string;
@@ -202,7 +203,7 @@ async function load(configPath?: string) {
     install_cli: raw.install_cli ?? true,
     install_desktop: raw.install_desktop ?? defaultInstallDesktop(),
     notify_timeout: raw.notify_timeout ?? 120,
-    retry_attempts: raw.retry_attempts ?? 3,
+    retry_attempts: Math.max(1, raw.retry_attempts ?? 3),
     retry_delay_ms: raw.retry_delay_ms ?? 10_000,
     git_origin: raw.git_origin ?? `https://github.com/${releaseRepo}.git`,
     config_file: file,
@@ -418,6 +419,7 @@ async function runOpenCodeWithRetry(
 ) {
   const envWithFlag = { ...env, OPENCODE_DISABLE_PROJECT_CONFIG: "1" };
   let lastErr: unknown;
+  let logOffset = 0;
 
   for (let attempt = 1; attempt <= cfg.retry_attempts; attempt++) {
     const isRetry = attempt > 1;
@@ -427,6 +429,7 @@ async function runOpenCodeWithRetry(
       await sleep(cfg.retry_delay_ms);
     }
 
+    const beforeSize = await fileSize(log);
     const args = [cfg.opencode_bin, "run"];
     if (isRetry) args.push("--continue");
     args.push("--agent", cfg.agent, "--model", cfg.model, prompt);
@@ -440,7 +443,9 @@ async function runOpenCodeWithRetry(
       return;
     } catch (err) {
       lastErr = err;
-      if (!isRetryableError(err, log)) {
+      const afterSize = await fileSize(log);
+      const attemptLog = readLogSlice(log, beforeSize);
+      if (!isRetryableError(err, attemptLog)) {
         throw err;
       }
       out(`Attempt ${attempt} failed with retryable provider error.`);
@@ -448,37 +453,6 @@ async function runOpenCodeWithRetry(
   }
 
   throw lastErr;
-}
-
-function isRetryableError(err: unknown, log: string): boolean {
-  if (!(err instanceof Error)) return false;
-  const msg = err.message.toLowerCase();
-
-  if (msg.includes("exited with")) {
-    try {
-      const logContent = readFileSync(log, "utf8").toLowerCase();
-      return (
-        logContent.includes("provider returned error") ||
-        logContent.includes("provider returned an error") ||
-        logContent.includes("overloaded") ||
-        logContent.includes("rate limit") ||
-        logContent.includes("too many requests") ||
-        logContent.includes("429") ||
-        logContent.includes("503") ||
-        logContent.includes("502") ||
-        logContent.includes("500 internal server error") ||
-        logContent.includes("connection error") ||
-        logContent.includes("fetch failed") ||
-        logContent.includes("socket hang up") ||
-        logContent.includes("econnreset") ||
-        logContent.includes("etimedout") ||
-        logContent.includes("context deadline exceeded")
-      );
-    } catch {
-      return false;
-    }
-  }
-  return false;
 }
 
 async function latest(cfg: Cfg) {
