@@ -28,15 +28,21 @@ type RawCfg = {
   git_origin: string;
   retry_attempts?: number;
   retry_delay_ms?: number;
+  build_retry_attempts?: number;
+  build_retry_delay_ms?: number;
+  skip_permissions?: boolean;
 };
 
-type Cfg = Omit<RawCfg, "runtime_dir" | "prompt_path" | "retry_attempts" | "retry_delay_ms"> & {
+type Cfg = Omit<RawCfg, "runtime_dir" | "prompt_path" | "retry_attempts" | "retry_delay_ms" | "build_retry_attempts" | "build_retry_delay_ms" | "skip_permissions"> & {
   runtime_dir: string;
   prompt_path: string;
   config_file: string;
   config_dir: string;
   retry_attempts: number;
   retry_delay_ms: number;
+  build_retry_attempts: number;
+  build_retry_delay_ms: number;
+  skip_permissions: boolean;
 };
 
 type Cli = {
@@ -112,6 +118,7 @@ async function main() {
   if (cli.cmd === "preview") return preview(cfg);
   if (cli.cmd === "status") return status(cfg);
   if (cli.cmd === "check") return check(cfg, cli.force);
+  if (cli.cmd === "continue") return continueRun(cfg);
 }
 
 function parseCli(rawArgs: string[]): Cli {
@@ -160,6 +167,7 @@ function parseCli(rawArgs: string[]): Cli {
 
 function needsConfig(cli: Cli) {
   if (cli.cmd === "check") return cli.positionals.length <= 1;
+  if (cli.cmd === "continue") return cli.positionals.length <= 1;
   if (cli.cmd === "preview") return cli.positionals.length === 1;
   if (cli.cmd === "status") return cli.positionals.length === 1;
   if (cli.cmd === "install-ready") return cli.positionals.length === 1;
@@ -179,7 +187,7 @@ function printHelp() {
 }
 
 function helpText() {
-  return `OpenCode Release Watch\n\nUsage:\n  orw [--config <path>] [command] [options]\n  orw --help\n\nCommands:\n  init                  Create orw.config.json in the current directory\n  preview               Print the integration prompt for the latest release\n  check                 Build the latest release if needed; default command\n  status                Print the last successful build/install state\n  install-ready         Install the last verified artifacts\n  install-when-closed   Wait for OpenCode to quit, then install\n  launchd install       Install the macOS launchd scheduler\n  launchd uninstall     Remove the macOS launchd scheduler\n\nOptions:\n  -c, --config <path>       Use a specific config file\n  --force                   Rebuild even if the latest release was processed\n  --wait-for-opencode       With install-ready, wait until OpenCode quits\n  -h, --help                Show this help\n\nConfig (orw.config.json):\n  retry_attempts            Number of retry attempts on provider error (default: 3)\n  retry_delay_ms            Delay between retries in milliseconds (default: 10000)\n`;
+  return `OpenCode Release Watch\n\nUsage:\n  orw [--config <path>] [command] [options]\n  orw --help\n\nCommands:\n  init                  Create orw.config.json in the current directory\n  preview               Print the integration prompt for the latest release\n  check                 Build the latest release if needed; default command\n  status                Print the last successful build/install state\n  install-ready         Install the last verified artifacts\n  install-when-closed   Wait for OpenCode to quit, then install\n  launchd install       Install the macOS launchd scheduler\n  launchd uninstall     Remove the macOS launchd scheduler\n  continue              Resume the last interrupted opencode session\n\nOptions:\n  -c, --config <path>       Use a specific config file\n  --force                   Rebuild even if the latest release was processed\n  --wait-for-opencode       With install-ready, wait until OpenCode quits\n  -h, --help                Show this help\n\nConfig (orw.config.json):\n  retry_attempts            Number of retry attempts on provider error (default: 3)\n  retry_delay_ms            Delay between retries in milliseconds (default: 10000)\n`;
 }
 
 async function load(configPath?: string) {
@@ -205,6 +213,9 @@ async function load(configPath?: string) {
     notify_timeout: raw.notify_timeout ?? 120,
     retry_attempts: Math.max(1, raw.retry_attempts ?? 3),
     retry_delay_ms: raw.retry_delay_ms ?? 10_000,
+    build_retry_attempts: Math.max(1, raw.build_retry_attempts ?? 3),
+    build_retry_delay_ms: raw.build_retry_delay_ms ?? 30_000,
+    skip_permissions: raw.skip_permissions ?? true,
     git_origin: raw.git_origin ?? `https://github.com/${releaseRepo}.git`,
     config_file: file,
     config_dir: configDir,
@@ -268,6 +279,9 @@ function initConfig(): RawCfg & { runtime_dir: string } {
     notify_timeout: 120,
     retry_attempts: 3,
     retry_delay_ms: 10_000,
+    build_retry_attempts: 3,
+    build_retry_delay_ms: 30_000,
+    skip_permissions: true,
   };
 }
 
@@ -325,17 +339,8 @@ async function check(cfg: Cfg, force: boolean) {
     await prep(cfg, sources, log);
     const env = releaseEnv(release);
     const prompt = await render(cfg, sources, release);
-    try {
-      await runOpenCodeWithRetry(cfg, prompt, env, log);
-    } catch (err) {
-      await notify(
-        "OpenCode integration failed",
-        `${release.tag_name} failed. See ${log}.`,
-      );
-      throw err;
-    }
-
-    const next = await verifyBuild(cfg, release, log);
+    const next = await runOpenCodeWithBuildRetry(cfg, prompt, env, log, release);
+    await writeState(cfg, next);
     await writeState(cfg, next);
     await notify(
       "OpenCode build ready",
@@ -378,6 +383,79 @@ async function check(cfg: Cfg, force: boolean) {
   }
 }
 
+async function continueRun(cfg: Cfg) {
+  const release = await latest(cfg);
+  const prev = await readState(cfg);
+  if (!prev.tag) throw new Error("No previous build state found. Run `orw check` first.");
+
+  const free = await hold(cfg, true);
+  try {
+    const log = prev.log ?? path.join(
+      logDir(cfg),
+      `${stamp()}-${release.tag_name.replaceAll("/", "-")}-continue.log`,
+    );
+    await fs.mkdir(path.dirname(log), { recursive: true });
+    await note(log, `\n--- Resuming: continue run for ${release.tag_name} ---\n`);
+
+    const env = releaseEnv(release);
+    const sources = resolveSources(cfg);
+    const prompt = await render(cfg, sources, release);
+
+    out(`Resuming last opencode session for ${release.tag_name}...`);
+    const next = await runOpenCodeWithBuildRetry(cfg, prompt, env, log, release);
+    await writeState(cfg, next);
+    out(`Continue completed for ${release.tag_name}`);
+  } finally {
+    await free();
+  }
+}
+
+async function runOpenCodeWithBuildRetry(
+  cfg: Cfg,
+  prompt: string,
+  env: Record<string, string>,
+  log: string,
+  release: { tag_name: string; html_url: string },
+): Promise<State> {
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= cfg.build_retry_attempts; attempt++) {
+    try {
+      await runOpenCodeWithRetry(cfg, prompt, env, log);
+      return await verifyBuild(cfg, release, log);
+    } catch (err) {
+      lastErr = err;
+      if (!await isBuildRetryableError(cfg, err)) {
+        throw err;
+      }
+      if (attempt >= cfg.build_retry_attempts) break;
+      out(`Build attempt ${attempt}/${cfg.build_retry_attempts} did not produce verified artifacts, retrying opencode (waiting ${cfg.build_retry_delay_ms / 1000}s)...`);
+      await sleep(cfg.build_retry_delay_ms);
+    }
+  }
+  throw lastErr;
+}
+
+async function isBuildRetryableError(cfg: Cfg, err: unknown): Promise<boolean> {
+  if (!(err instanceof Error)) return false;
+  const msg = err.message.toLowerCase();
+  const code = "code" in err ? err.code : undefined;
+  
+  if (code === "ENOENT") {
+    const cli = cliPath(cfg);
+    return !(await exists(cli));
+  }
+  
+  const buildErrorPatterns = [
+    "expected a string starting with",
+    "build failed",
+    "compilation failed",
+    "typescript error",
+    "error ts",
+    "bun run build",
+  ];
+  return buildErrorPatterns.some((p) => msg.includes(p));
+}
+
 async function verifyBuild(
   cfg: Cfg,
   release: { tag_name: string; html_url: string },
@@ -403,10 +481,12 @@ async function verifyBuild(
       at: new Date().toISOString(),
     };
   } catch (err) {
-    await notify(
-      "OpenCode integration failed",
-      `${release.tag_name} did not produce verified artifacts. See ${log}.`,
-    );
+    if (await isBuildRetryableError(cfg, err)) {
+      await notify(
+        "OpenCode integration failed",
+        `${release.tag_name} did not produce verified artifacts. See ${log}.`,
+      );
+    }
     throw err;
   }
 }
@@ -431,6 +511,7 @@ async function runOpenCodeWithRetry(
 
     const beforeSize = await fileSize(log);
     const args = [cfg.opencode_bin, "run"];
+    if (cfg.skip_permissions) args.push("--dangerously-skip-permissions");
     if (isRetry) args.push("--continue");
     args.push("--agent", cfg.agent, "--model", cfg.model, prompt);
 
