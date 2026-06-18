@@ -20,12 +20,29 @@ export function isRetryableError(err: unknown, logSlice: string): boolean {
     "etimedout",
     "context deadline exceeded",
     "500 internal server error",
+    "aborted",
+    "abort",
   ];
   if (textPatterns.some((p) => content.includes(p))) return true;
 
   const httpStatusRegex = /(?:http|status|error|response)[\s:]+429\b/;
   const httpServerErrorRegex = /(?:http|status|error|response)[\s:]+50[23]\b/;
-  return httpStatusRegex.test(content) || httpServerErrorRegex.test(content);
+  if (httpStatusRegex.test(content) || httpServerErrorRegex.test(content)) return true;
+
+  const nonRetryableBuildPatterns = [
+    "build failed",
+    "compilation failed",
+    "typescript error",
+    "error ts",
+    "expected a string starting with",
+  ];
+  const hasBuildError = nonRetryableBuildPatterns.some((p) => content.includes(p));
+  if (hasBuildError) return false;
+
+  const trimmedSlice = content.trim();
+  if (trimmedSlice.length === 0) return true;
+
+  return false;
 }
 
 export function readLogSlice(file: string, byteOffset: number): string {

@@ -55,6 +55,18 @@ describe("isRetryableError", () => {
     expect(isRetryableError(err, "Error: 500 internal server error")).toBe(true);
   });
 
+  test("detects 'aborted' in log slice", () => {
+    const err = new Error("opencode exited with 1");
+    expect(isRetryableError(err, "Error: Aborted")).toBe(true);
+  });
+
+  test("treats empty or very short log slices as retryable for non-zero exits", () => {
+    const err = new Error("opencode exited with 1");
+    expect(isRetryableError(err, "")).toBe(true);
+    expect(isRetryableError(err, "   ")).toBe(true);
+    expect(isRetryableError(err, "Aborted")).toBe(true);
+  });
+
   test("returns false for non-retryable errors", () => {
     const err = new Error("opencode exited with 1");
     expect(isRetryableError(err, "Error: build failed")).toBe(false);

@@ -402,7 +402,7 @@ async function continueRun(cfg: Cfg) {
     const prompt = await render(cfg, sources, release);
 
     out(`Resuming last opencode session for ${release.tag_name}...`);
-    const next = await runOpenCodeWithBuildRetry(cfg, prompt, env, log, release);
+    const next = await runOpenCodeWithBuildRetry(cfg, prompt, env, log, release, true);
     await writeState(cfg, next);
     out(`Continue completed for ${release.tag_name}`);
   } finally {
@@ -416,11 +416,12 @@ async function runOpenCodeWithBuildRetry(
   env: Record<string, string>,
   log: string,
   release: { tag_name: string; html_url: string },
+  forceContinue = false,
 ): Promise<State> {
   let lastErr: unknown;
   for (let attempt = 1; attempt <= cfg.build_retry_attempts; attempt++) {
     try {
-      await runOpenCodeWithRetry(cfg, prompt, env, log);
+      await runOpenCodeWithRetry(cfg, prompt, env, log, forceContinue);
       return await verifyBuild(cfg, release, log);
     } catch (err) {
       lastErr = err;
@@ -496,6 +497,7 @@ async function runOpenCodeWithRetry(
   prompt: string,
   env: Record<string, string>,
   log: string,
+  forceContinue = false,
 ) {
   const envWithFlag = { ...env, OPENCODE_DISABLE_PROJECT_CONFIG: "1" };
   let lastErr: unknown;
@@ -512,7 +514,7 @@ async function runOpenCodeWithRetry(
     const beforeSize = await fileSize(log);
     const args = [cfg.opencode_bin, "run"];
     if (cfg.skip_permissions) args.push("--dangerously-skip-permissions");
-    if (isRetry) args.push("--continue");
+    if (isRetry || forceContinue) args.push("--continue");
     args.push("--agent", cfg.agent, "--model", cfg.model, prompt);
 
     try {
