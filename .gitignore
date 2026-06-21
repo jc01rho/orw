@@ -24,3 +24,8 @@ state/*
 !state/.keep
 artifacts/*
 !artifacts/.keep
+
+.omo/
+bun.lock
+opencode
+opencode-shallow

@@ -55,16 +55,24 @@ describe("isRetryableError", () => {
     expect(isRetryableError(err, "Error: 500 internal server error")).toBe(true);
   });
 
-  test("detects 'aborted' in log slice", () => {
+  test("detects 'aborted' only with provider/transport context", () => {
     const err = new Error("opencode exited with 1");
-    expect(isRetryableError(err, "Error: Aborted")).toBe(true);
+    expect(isRetryableError(err, "Connection aborted")).toBe(true);
+    expect(isRetryableError(err, "fetch aborted")).toBe(true);
+    expect(isRetryableError(err, "request aborted")).toBe(true);
   });
 
-  test("treats empty or very short log slices as retryable for non-zero exits", () => {
+  test("rejects bare abort without provider/transport context", () => {
     const err = new Error("opencode exited with 1");
-    expect(isRetryableError(err, "")).toBe(true);
-    expect(isRetryableError(err, "   ")).toBe(true);
-    expect(isRetryableError(err, "Aborted")).toBe(true);
+    expect(isRetryableError(err, "Aborted")).toBe(false);
+    expect(isRetryableError(err, "abort")).toBe(false);
+    expect(isRetryableError(err, "Error: Aborted")).toBe(false);
+  });
+
+  test("treats empty or very short log slices as non-retryable", () => {
+    const err = new Error("opencode exited with 1");
+    expect(isRetryableError(err, "")).toBe(false);
+    expect(isRetryableError(err, "   ")).toBe(false);
   });
 
   test("returns false for non-retryable errors", () => {

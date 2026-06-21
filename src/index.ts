@@ -215,7 +215,7 @@ async function load(configPath?: string) {
     retry_delay_ms: raw.retry_delay_ms ?? 10_000,
     build_retry_attempts: Math.max(1, raw.build_retry_attempts ?? 3),
     build_retry_delay_ms: raw.build_retry_delay_ms ?? 30_000,
-    skip_permissions: raw.skip_permissions ?? true,
+    skip_permissions: raw.skip_permissions ?? false,
     git_origin: raw.git_origin ?? `https://github.com/${releaseRepo}.git`,
     config_file: file,
     config_dir: configDir,
@@ -281,7 +281,7 @@ function initConfig(): RawCfg & { runtime_dir: string } {
     retry_delay_ms: 10_000,
     build_retry_attempts: 3,
     build_retry_delay_ms: 30_000,
-    skip_permissions: true,
+    skip_permissions: false,
   };
 }
 
@@ -340,7 +340,6 @@ async function check(cfg: Cfg, force: boolean) {
     const env = releaseEnv(release);
     const prompt = await render(cfg, sources, release);
     const next = await runOpenCodeWithBuildRetry(cfg, prompt, env, log, release);
-    await writeState(cfg, next);
     await writeState(cfg, next);
     await notify(
       "OpenCode build ready",

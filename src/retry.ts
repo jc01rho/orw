@@ -20,8 +20,10 @@ export function isRetryableError(err: unknown, logSlice: string): boolean {
     "etimedout",
     "context deadline exceeded",
     "500 internal server error",
-    "aborted",
-    "abort",
+    "connection aborted",
+    "fetch aborted",
+    "request aborted",
+    "operation aborted",
   ];
   if (textPatterns.some((p) => content.includes(p))) return true;
 
@@ -38,9 +40,6 @@ export function isRetryableError(err: unknown, logSlice: string): boolean {
   ];
   const hasBuildError = nonRetryableBuildPatterns.some((p) => content.includes(p));
   if (hasBuildError) return false;
-
-  const trimmedSlice = content.trim();
-  if (trimmedSlice.length === 0) return true;
 
   return false;
 }
