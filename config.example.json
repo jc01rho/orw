@@ -13,5 +13,7 @@
   "desktop_target": "/Applications/OpenCode.app",
   "install_cli": true,
   "install_desktop": false,
-  "notify_timeout": 120
+  "notify_timeout": 120,
+  "retry_attempts": 3,
+  "retry_delay_ms": 10000
 }
