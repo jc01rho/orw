@@ -341,41 +341,7 @@ async function check(cfg: Cfg, force: boolean) {
     const prompt = await render(cfg, sources, release);
     const next = await runOpenCodeWithBuildRetry(cfg, prompt, env, log, release);
     await writeState(cfg, next);
-    await notify(
-      "OpenCode build ready",
-      `${release.tag_name} is integrated and built.`,
-    );
-    const running = await runningOpenCodeProcesses();
-    if (running.length > 0) {
-      await notify(
-        "OpenCode install blocked",
-        `Run ${orwCommand(cfg, "install-when-closed")}, then quit OpenCode to install.`,
-      );
-      out(`Integrated ${release.tag_name}. Install skipped because OpenCode is running:`);
-      for (const proc of running) out(`- pid ${proc.pid}: ${proc.command}`);
-      out("");
-      out("To install after OpenCode exits, run:");
-      out(`  ${orwCommand(cfg, "install-when-closed")}`);
-      return;
-    }
-    if (canPromptForInstall()) {
-      const ok = await ask(
-        "OpenCode build ready",
-        `${release.tag_name} is ready. Install the ${installLabel(cfg)} now?`,
-        cfg.notify_timeout,
-      );
-      if (ok === "Yes") {
-        await install(cfg, next);
-        await notify(
-          "OpenCode installed",
-          `${release.tag_name} was installed from the local build.`,
-        );
-      } else {
-        printInstallHint(cfg, release.tag_name);
-      }
-    } else {
-      printInstallHint(cfg, release.tag_name);
-    }
+    await handlePostBuild(cfg, next, release.tag_name);
     out(`Integrated ${release.tag_name}`);
   } finally {
     await free();
@@ -403,6 +369,7 @@ async function continueRun(cfg: Cfg) {
     out(`Resuming last opencode session for ${release.tag_name}...`);
     const next = await runOpenCodeWithBuildRetry(cfg, prompt, env, log, release, true);
     await writeState(cfg, next);
+    await handlePostBuild(cfg, next, release.tag_name);
     out(`Continue completed for ${release.tag_name}`);
   } finally {
     await free();
@@ -806,6 +773,42 @@ function watchSlug(owner: string, repo: string) {
 
 function canPromptForInstall() {
   return process.platform === "darwin";
+}
+
+async function handlePostBuild(cfg: Cfg, next: State, tagName: string) {
+  await notify(
+    "OpenCode build ready",
+    `${tagName} is integrated and built.`,
+  );
+  const running = await runningOpenCodeProcesses();
+  if (running.length > 0) {
+    await notify(
+      "OpenCode install blocked",
+      `Run ${orwCommand(cfg, "install-when-closed")}, then quit OpenCode to install.`,
+    );
+    out(`${tagName} build is ready, but install skipped because OpenCode is running:`);
+    for (const proc of running) out(`- pid ${proc.pid}: ${proc.command}`);
+    out("");
+    out("To install after OpenCode exits, run:");
+    out(`  ${orwCommand(cfg, "install-when-closed")}`);
+    return;
+  }
+  if (canPromptForInstall()) {
+    const ok = await ask(
+      "OpenCode build ready",
+      `${tagName} is ready. Install the ${installLabel(cfg)} now?`,
+      cfg.notify_timeout,
+    );
+    if (ok === "Yes") {
+      await install(cfg, next);
+      await notify(
+        "OpenCode installed",
+        `${tagName} was installed from the local build.`,
+      );
+      return;
+    }
+  }
+  printInstallHint(cfg, tagName);
 }
 
 function installLabel(cfg: Cfg) {
